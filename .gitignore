@@ -1,0 +1,26 @@
+# Node
+node_modules/
+.npm/
+.next/
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Build / artifacts
+dist/
+coverage/
