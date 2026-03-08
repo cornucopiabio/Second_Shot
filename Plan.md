@@ -40,6 +40,14 @@ Core product thesis:
 * Wet-lab execution integration
 * RFdiffusion in main workflow
 
+### Pre-implementation decisions (must be locked before coding)
+
+* Primary demo indication area (single disease family)
+* Drug source(s) for MVP (and license/access constraints)
+* Model provider strategy (single-model first vs multi-provider)
+* Docking mode (live, cached, or disabled for default path)
+* Minimum evaluation set (3-5 known drug-target sanity checks)
+
 ---
 
 ## 3) User Story
@@ -70,8 +78,8 @@ flowchart TD
     C --> C1[MONDO / Monarch]
     D --> D1[Open Targets]
     E --> E1[Reactome]
-    F --> F1[Drug DB + Patent / Market Status DB]
-    H --> H1[Tamarind API / DiffDock]
+    F --> F1[Drug DB + Status Heuristics]
+    H --> H1[Docking Provider (DiffDock API or local)]
 
     G --> G1[Agent A: Disease Mechanism]
     G --> G2[Agent B: Pathway Prioritization]
@@ -238,55 +246,60 @@ This preserves the “consortium” feel while keeping runtime and costs bounded
 
 ---
 
-## 6) Recommended Tech Stack
+## 6) Recommended Tech Stack (Implementation-Safe)
 
 ### Frontend
 
 * **Next.js + React + TypeScript**
 * **Tailwind CSS**
-* **shadcn/ui** for fast polished components
-* **Recharts** or simple charting for ranking visualizations
+* **shadcn/ui** for polished components
+* **Recharts** (or equivalent) for ranking visualizations
 
 ### Backend / API layer
 
-* **Python FastAPI** for orchestration and data APIs
-* Alternatively **Next.js API routes** for lightweight endpoints, but FastAPI is better for scientific/data workflows
+* **Python FastAPI + Pydantic v2** for orchestration and data APIs
+* Single backend service for MVP to keep contracts and tracing simple
 
 ### Async / workflow orchestration
 
-* **Modal** for scalable GPU/compute jobs, async workers, and any heavier docking-related execution or batch preprocessing. Modal supports serverless GPU workloads, batch jobs, and ephemeral compute. ([modal.com](https://modal.com/docs?utm_source=chatgpt.com))
-* Lightweight in-process task queue for MVP, or Redis-backed queue if needed
+* MVP default: synchronous pipeline + optional background docking job
+* Job state in Redis (simple queue pattern); upgrade to dedicated workers only if latency requires it
+* Optional scale path: Modal or equivalent for heavier docking/batch compute
 
 ### LLM / agent layer
 
-* **Anthropic Claude Opus 4.6** for the high-value synthesis steps in Agent B and Agent C. Anthropic describes Opus 4.6 as its most capable model, recommended for sophisticated agents and complex document creation. ([anthropic.com](https://www.anthropic.com/news/claude-opus-4-6?utm_source=chatgpt.com))
-* **OpenAI GPT-5.4 via the Responses API** for structured extraction, formatting, and fallback reasoning; OpenAI’s current API docs list GPT-5.4 and the Responses API as core building blocks. ([platform.openai.com](https://platform.openai.com/docs/gpts/release-notes?utm_source=chatgpt.com))
+* Provider-agnostic model configuration through environment variables:
+  * `MODEL_REASONER`
+  * `MODEL_STRUCTURED`
+* Start with one model for all agents in MVP; add second-model routing only if evaluation improves outcomes
+* Strict JSON schema validation for every agent response (fail fast + one retry)
 
 ### Datastores
 
 * **Postgres** for normalized metadata and results
-* **Redis** for caching query responses / transient state
-* **Object storage** for artifacts such as docking result JSON or images
+* **Redis** for cache and transient job state
+* **Object storage** for artifacts (docking JSON, poses, reports)
 
 ### Scientific / data sources
 
 * **MONDO / Monarch** for disease ontology resolution
-* **Open Targets GraphQL API** for target–disease associations; Open Targets supports GraphQL queries for diseases, drugs, targets, and associations. ([platform-docs.opentargets.org](https://platform-docs.opentargets.org/data-access/graphql-api?utm_source=chatgpt.com))
-* **Reactome** for pathway enrichment and pathway content service
-* **Drug database + patent/market-status source** for drug-target pairs and off-patent filtering
-* **Tamarind API** for DiffDock inference
+* **Open Targets GraphQL API** for target-disease associations
+* **Reactome** for pathway enrichment/content
+* Drug-target source must be locked in Phase 0 (recommended MVP baseline: ChEMBL + DrugCentral)
+* Off-patent status treated as heuristic unless authoritative jurisdiction-specific data is integrated
 
 ### Docking / structural layer
 
-* Tamarind-hosted **DiffDock**
-* Keep RFdiffusion as stretch / optional extension, not core workflow
+* DiffDock via provider API or local runner
+* Pipeline must succeed when docking is disabled (docking is additive evidence)
+* Keep RFdiffusion as stretch, not core workflow
 
 ### Observability
 
-* Structured logs for every pipeline stage
-* Prompt / output capture for each agent
+* Structured logs for every stage
+* Prompt/response capture for each agent
 * Score breakdown traceability
-* Simple admin panel or debug JSON viewer
+* Per-stage latency + failure metrics
 
 ---
 
@@ -302,7 +315,7 @@ sequenceDiagram
     participant RE as Reactome
     participant DRUG as Drug Service
     participant AG as Agent Consortium
-    participant DOCK as Tamarind DiffDock
+    participant DOCK as Docking Provider
     participant DB as Postgres/Redis
 
     U->>FE: Enter indication
@@ -317,7 +330,7 @@ sequenceDiagram
     RE-->>BE: Pathways + nodes
     BE->>AG: Agent B input
     AG-->>BE: Ranked pathways + druggable nodes
-    BE->>DRUG: Retrieve drugs for nodes / filter off-patent
+    BE->>DRUG: Retrieve drugs for nodes / apply repurposability heuristics
     DRUG-->>BE: Candidate drugs + MOA
     BE->>AG: Agent C input
     AG-->>BE: Ranked repurposing candidates
@@ -380,10 +393,10 @@ sequenceDiagram
 * combine:
 
   * disease-target evidence
-    n  - pathway relevance
+  * pathway relevance
   * mechanism-direction fit
-  * off-patent / maturity filter
-  * docking support
+  * repurposability (approved / mature / off-patent heuristic)
+  * docking support (if available)
 
 ---
 
@@ -408,11 +421,13 @@ Where:
 * **structural_plausibility** = docking support if run
 * **repurposability_score** = off-patent / approved / public-data-rich / known safety profile
 
+If docking is disabled or unavailable, re-normalize weights across the remaining terms so candidates are not penalized for missing structural data.
+
 ---
 
 ## 10) API Design
 
-### Backend endpoints
+### Backend endpoints (MVP)
 
 #### `POST /resolve-indication`
 
@@ -433,58 +448,78 @@ Output:
 }
 ```
 
-#### `POST /build-disease-context`
+#### `POST /runs`
+
+Creates and starts a full ranking run.
 
 Input:
 
 ```json
-{"mondo_id": "MONDO:..."}
+{"mondo_id": "MONDO:...", "top_k": 20, "enable_docking": false}
 ```
 
 Output:
 
 ```json
 {
-  "disease": {...},
-  "targets": [...],
-  "pathways": [...]
+  "run_id": "run_123",
+  "status": "running"
 }
 ```
 
-#### `POST /rank-candidates`
+#### `GET /runs/{run_id}`
 
-Input:
-
-```json
-{"mondo_id": "MONDO:...", "top_k": 20}
-```
+Returns run status and partial/final outputs.
 
 Output:
 
 ```json
 {
+  "run_id": "run_123",
+  "status": "completed",
+  "stage": "finalized",
   "candidates": [...],
   "score_breakdown": [...]
 }
 ```
 
-#### `POST /dock-candidate`
+#### `POST /runs/{run_id}/dock`
+
+Optionally trigger docking on top candidate pairs after base ranking.
 
 Input:
 
 ```json
-{"drug": "ExampleDrug", "target": "TGFBR1"}
+{"pairs": [{"drug": "ExampleDrug", "target": "TGFBR1"}]}
 ```
 
 Output:
 
 ```json
 {
-  "status": "complete",
-  "pose_url": "...",
-  "confidence": 0.73
+  "run_id": "run_123",
+  "status": "docking_running"
 }
 ```
+
+#### `GET /runs/{run_id}/report`
+
+Returns user-facing explanation payload.
+
+Output:
+
+```json
+{
+  "summary": "...",
+  "top_candidates": [...],
+  "limitations": [...]
+}
+```
+
+Implementation notes:
+
+* Long-running operations are run-scoped with explicit status transitions (`queued`, `running`, `completed`, `failed`, `partial`)
+* All responses include traceable stage-level errors rather than failing silently
 
 ---
 
@@ -497,7 +532,10 @@ Output:
 * `mondo_id`
 * `disease_label`
 * `status`
+* `current_stage`
+* `error_json`
 * `created_at`
+* `updated_at`
 
 ### Table: `targets`
 
@@ -533,6 +571,7 @@ Output:
 * `repurposing_score`
 * `score_breakdown_json`
 * `rationale`
+* `confidence_note`
 
 ### Table: `docking_jobs`
 
@@ -541,9 +580,20 @@ Output:
 * `drug_name`
 * `target`
 * `job_status`
+* `provider`
 * `confidence`
 * `artifact_url`
 * `interpretation_json`
+
+### Table: `run_events`
+
+* `id`
+* `run_id`
+* `stage`
+* `status`
+* `message`
+* `payload_json`
+* `created_at`
 
 ---
 
@@ -596,69 +646,113 @@ Return only JSON.
 
 ## 13) Execution Plan
 
+### Phase -1 — Day 0 bootstrap (current repo is docs-only)
+
+* Scaffold `apps/web` (Next.js) and `apps/api` (FastAPI)
+* Add `docker-compose.yml` for Postgres + Redis
+* Add `.env.example` with all required keys
+* Add lint/test scripts and CI baseline
+
+Exit criteria:
+
+* Both apps boot locally
+* Health endpoint works (`GET /health`)
+* One command runs lint+tests in CI
+
 ### Phase 0 — Scope lock
 
-* Pick one disease area for the live demo
-* Choose 1–3 example indications
-* Decide which drug DB / off-patent metadata source to use
-* Decide whether docking is live or partially cached
+* Pick one disease area for the demo
+* Choose 1-3 example indications
+* Lock drug DB + off-patent heuristic source
+* Decide docking mode for demo path (`off` by default, optional `on`)
+* Freeze JSON schemas for Agent A/B/C/D I/O
 
-### Phase 1 — Skeleton app
+Exit criteria:
 
-* Create Next.js frontend
-* Create FastAPI backend
-* Add `/resolve-indication`
-* Add MONDO narrowing UI
-* Add run state model
+* Scope decisions documented in `docs/scope.md`
+* Input/output schemas committed in `packages/shared-types`
+
+### Phase 1 — Skeleton app + indication resolution
+
+* Implement `POST /resolve-indication`
+* Build MONDO narrowing UI flow
+* Implement run creation + status polling (`POST /runs`, `GET /runs/{id}`)
+
+Exit criteria:
+
+* User can resolve a query to a MONDO term from UI
+* Run record persists to Postgres
 
 ### Phase 2 — Disease and pathway pipeline
 
-* Integrate Open Targets queries
-* Integrate Reactome enrichment / lookup
-* Normalize target/pathway payloads
-* Store results in Postgres
+* Integrate Open Targets target-disease retrieval
+* Integrate Reactome pathway lookup/enrichment
+* Normalize and persist target/pathway payloads
+
+Exit criteria:
+
+* For a fixed indication, pipeline produces deterministic target/pathway JSON
+* Cached reruns are significantly faster than cold runs
 
 ### Phase 3 — Agent consortium
 
-* Implement Agent A / B / C / D wrappers
-* Add schema validation around agent outputs
-* Add bounded two-round consortium flow
-* Log prompts / outputs for debugging
+* Implement Agent A/B/C/D wrappers
+* Add strict schema validation with retry-once logic
+* Implement bounded two-round consortium flow
+* Log prompt and model output artifacts
+
+Exit criteria:
+
+* Agent outputs always parse and validate
+* Failed agent calls surface explicit stage errors
 
 ### Phase 4 — Drug retrieval + scoring
 
-* Build drug retrieval service
-* Add off-patent filtering
-* Add composite score calculation
-* Create ranked candidate cards in UI
+* Build drug retrieval service for direct + pathway-adjacent nodes
+* Apply repurposability heuristic (approved/mature/off-patent signal)
+* Implement composite score calculation
+* Render ranked candidate cards in UI
 
-### Phase 5 — Docking integration
+Exit criteria:
 
-* Add Tamarind DiffDock call wrapper
-* Persist results / artifacts
-* Feed docking outputs into Agent D
-* Show structural plausibility in UI
+* UI displays top N candidates with score breakdown
+* Score formula and features are fully traceable per candidate
+
+### Phase 5 — Optional docking integration
+
+* Add DiffDock provider wrapper
+* Persist docking jobs/artifacts
+* Feed docking outcomes to Agent D and confidence adjustment
+
+Exit criteria:
+
+* Base ranking works with docking disabled
+* Docking-enabled run updates confidence without breaking pipeline
 
 ### Phase 6 — Demo polish
 
-* Add progress states
-* Add explanation cards
-* Add “why this drug” and “next validation assay” sections
-* Precompute 1–2 strong examples
+* Add progress states and failure messaging
+* Add "why this drug" and "next validation assay" sections
+* Precompute 1-2 reliable demo examples
+
+Exit criteria:
+
+* End-to-end demo completes in predictable time
+* Narrative is reproducible across prepared indications
 
 ---
 
 ## 14) Suggested Repo Structure
 
 ```text
-repo/
+.
   apps/
-    web/
-    api/
+    web/                  # Next.js app
+    api/                  # FastAPI app
   packages/
-    shared-types/
-    prompts/
-    scoring/
+    shared-types/         # Pydantic/TS shared contracts
+    prompts/              # Prompt templates + versions
+    scoring/              # Ranking logic
   services/
     mondo/
     open_targets/
@@ -669,10 +763,15 @@ repo/
   scripts/
     seed_data/
     preload_examples/
+  infra/
+    docker-compose.yml
   docs/
     architecture.md
     prompts.md
     api_contracts.md
+    scope.md
+  Plan.md
+  README.md
 ```
 
 ---
@@ -713,6 +812,10 @@ This tells a complete story from disease to experiment.
 
 **Mitigation:** cap candidates early and keep top N only.
 
+### Risk: output interpreted as treatment advice
+
+**Mitigation:** add explicit research-use-only disclaimer in UI and report payloads; include limitations section by default.
+
 ---
 
 ## 17) Recommended Final Scope for the Hackathon
@@ -749,11 +852,11 @@ This tells a complete story from disease to experiment.
 
 ## 19) Immediate Next Steps
 
-1. Lock disease area and example indication.
-2. Lock drug DB and off-patent source.
-3. Implement MONDO narrowing UI.
-4. Wire Open Targets + Reactome.
-5. Implement Agent A/B/C JSON contracts.
-6. Add scoring and candidate ranking.
-7. Add Tamarind docking for top pair.
-8. Polish the demo narrative.
+1. Complete Phase -1 bootstrap (scaffold `apps/web`, `apps/api`, and local Postgres/Redis).
+2. Lock disease area, example indications, and drug data sources in `docs/scope.md`.
+3. Implement `POST /resolve-indication` and UI narrowing flow.
+4. Implement run lifecycle endpoints (`POST /runs`, `GET /runs/{id}`).
+5. Wire Open Targets + Reactome and persist normalized outputs.
+6. Implement Agent A/B/C with strict JSON contracts and retries.
+7. Add scoring + ranked candidate UI.
+8. Integrate optional docking and finalize the demo narrative.
