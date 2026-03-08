@@ -1,0 +1,15 @@
+{
+  "name": "second-shot",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev",
+    "dev:api": "cd apps/api && uvicorn app.main:app --reload --host ${API_HOST:-0.0.0.0} --port ${API_PORT:-8000}",
+    "build:web": "npm --workspace apps/web run build",
+    "lint:web": "if [ -d apps/web/node_modules ]; then npm --workspace apps/web run lint; else echo 'Skipping web lint (install dependencies first)'; fi",
+    "lint": "npm run lint:web && cd apps/api && python3 -m compileall app",
+    "test": "cd apps/api && python3 -m unittest discover -s tests -p 'test_*.py'"
+  }
+}
