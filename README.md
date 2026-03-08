@@ -14,6 +14,13 @@ Indication-first drug repurposing MVP scaffold.
 - `apps/web` Next.js UI for resolving an indication and running a ranking flow
 - `infra/docker-compose.yml` for local Postgres + Redis
 - `docs/system-design.md` with component and runtime sequence diagrams
+- Live retrieval integrations:
+  - MONDO resolution via OLS4 MONDO API
+  - disease-target evidence via Open Targets GraphQL
+  - pathway context via Reactome ContentService
+- Anthropic-driven re-ranking in the candidate pipeline (no GPT dependency)
+- Tamarind-backed docking integration in `POST /runs/{run_id}/dock`
+- Offline-safe fallback behavior for demo continuity when external APIs are unavailable
 
 ## Local setup
 

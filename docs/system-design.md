@@ -7,18 +7,18 @@ flowchart LR
     U[User Browser] --> WEB[Next.js Web App]
     WEB --> API[FastAPI Orchestrator]
 
-    API --> MONDO[MONDO Resolver Service]
-    API --> OT[Open Targets Service]
-    API --> REACTOME[Reactome Service]
+    API --> MONDO[MONDO Resolver (OLS4)]
+    API --> OT[Open Targets GraphQL]
+    API --> REACTOME[Reactome ContentService]
     API --> DRUGS[Drug Retrieval Service]
-    API --> AGENTS[Agent Consortium]
-    API --> DOCK[Docking Service (Optional)]
+    API --> AGENTS[Agent Consortium (Anthropic)]
+    API --> DOCK[Tamarind Docking Service (Optional)]
 
     API --> PG[(Postgres)]
     API --> REDIS[(Redis Cache/Jobs)]
     API --> OBJ[(Artifact Storage)]
 
-    AGENTS --> LLM[LLM Provider]
+    AGENTS --> LLM[Anthropic API]
     DOCK --> OBJ
 ```
 

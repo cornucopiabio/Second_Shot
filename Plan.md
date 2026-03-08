@@ -268,10 +268,12 @@ This preserves the “consortium” feel while keeping runtime and costs bounded
 
 ### LLM / agent layer
 
-* Provider-agnostic model configuration through environment variables:
-  * `MODEL_REASONER`
-  * `MODEL_STRUCTURED`
-* Start with one model for all agents in MVP; add second-model routing only if evaluation improves outcomes
+* **Anthropic** is the required reasoning provider for MVP.
+* Environment configuration:
+  * `ANTHROPIC_API_KEY`
+  * `ANTHROPIC_MODEL`
+  * `ANTHROPIC_BASE_URL` (optional override)
+* Start with one Anthropic model for all agents in MVP; add routing only if evaluation improves outcomes
 * Strict JSON schema validation for every agent response (fail fast + one retry)
 
 ### Datastores
@@ -290,7 +292,8 @@ This preserves the “consortium” feel while keeping runtime and costs bounded
 
 ### Docking / structural layer
 
-* DiffDock via provider API or local runner
+* **Tamarind** docking API is the default structural provider (`TAMARIND_API_KEY`, `TAMARIND_BASE_URL`)
+* DiffDock via other providers/local runner is optional fallback only
 * Pipeline must succeed when docking is disabled (docking is additive evidence)
 * Keep RFdiffusion as stretch, not core workflow
 

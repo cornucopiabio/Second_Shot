@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -8,8 +9,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from app.pipeline import BioPipeline, MondoMatch, PipelineError
+from app.providers import AnthropicRanker, TamarindDockingClient
 
-app = FastAPI(title="Second Shot API", version="0.1.0")
+
+app = FastAPI(title="Second Shot API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,96 +57,56 @@ class DockRequest(BaseModel):
 
 class RunResponse(BaseModel):
     run_id: str
-    status: Literal["queued", "running", "completed", "failed", "partial", "docking_running"]
+    status: Literal[
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "partial",
+        "docking_running",
+    ]
     stage: str
     mondo_id: str
     top_k: int
     docking_enabled: bool
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     score_breakdown: list[dict[str, Any]] = Field(default_factory=list)
+    targets: list[dict[str, Any]] = Field(default_factory=list)
+    pathways: list[dict[str, Any]] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     created_at: str
     updated_at: str
+
+
+@lru_cache(maxsize=1)
+def get_pipeline() -> BioPipeline:
+    return BioPipeline()
+
+
+@lru_cache(maxsize=1)
+def get_anthropic_ranker() -> AnthropicRanker:
+    return AnthropicRanker()
+
+
+@lru_cache(maxsize=1)
+def get_tamarind_client() -> TamarindDockingClient:
+    return TamarindDockingClient()
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def resolve_query(query: str) -> list[Match]:
-    q = query.lower().strip()
-    lookup = {
-        "lung fibrosis": [
-            Match(label="pulmonary fibrosis", mondo_id="MONDO:0005950"),
-            Match(label="idiopathic pulmonary fibrosis", mondo_id="MONDO:0006374"),
-        ],
-        "idiopathic pulmonary fibrosis": [
-            Match(label="idiopathic pulmonary fibrosis", mondo_id="MONDO:0006374")
-        ],
-        "ulcerative colitis": [
-            Match(label="ulcerative colitis", mondo_id="MONDO:0005101")
-        ],
-        "glioblastoma": [Match(label="glioblastoma", mondo_id="MONDO:0018177")],
-    }
-
-    if q in lookup:
-        return lookup[q]
-
-    # Fallback keeps flow usable for hackathon demo without failing hard.
-    return [Match(label=query.strip().title(), mondo_id="MONDO:UNRESOLVED")]
-
-
-def build_mock_candidates(mondo_id: str, top_k: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    pool = [
+def build_score_breakdown(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
         {
-            "drug": "Nintedanib",
-            "target": "VEGFR2",
-            "action": "inhibitor",
-            "repurposing_score": 0.79,
-            "why": "Antifibrotic-aligned kinase inhibition with mature safety data.",
-        },
-        {
-            "drug": "Pirfenidone",
-            "target": "TGF-beta axis",
-            "action": "modulator",
-            "repurposing_score": 0.74,
-            "why": "Pathway-level alignment with profibrotic signaling control.",
-        },
-        {
-            "drug": "Fasudil",
-            "target": "ROCK1",
-            "action": "inhibitor",
-            "repurposing_score": 0.68,
-            "why": "Upstream cytoskeletal/fibrotic remodeling intervention point.",
-        },
-    ]
-
-    candidates: list[dict[str, Any]] = []
-    for item in pool[: min(len(pool), top_k)]:
-        candidate = {
-            **item,
-            "mondo_id": mondo_id,
-            "score_breakdown": {
-                "disease_target_relevance": round(item["repurposing_score"] * 0.95, 3),
-                "pathway_intervention_fit": round(item["repurposing_score"] * 0.9, 3),
-                "mechanism_directionality_fit": round(item["repurposing_score"] * 0.93, 3),
-                "structural_plausibility": None,
-                "repurposability_score": round(item["repurposing_score"] * 0.88, 3),
-            },
+            "drug": candidate["drug"],
+            "target": candidate["target"],
+            "score": candidate["repurposing_score"],
+            "components": candidate["score_breakdown"],
         }
-        candidates.append(candidate)
-
-    score_breakdown = [
-        {
-            "drug": c["drug"],
-            "target": c["target"],
-            "score": c["repurposing_score"],
-            "components": c["score_breakdown"],
-        }
-        for c in candidates
+        for candidate in candidates
     ]
-
-    return candidates, score_breakdown
 
 
 @app.get("/health")
@@ -156,14 +120,40 @@ def health() -> dict[str, str]:
 
 @app.post("/resolve-indication", response_model=ResolveIndicationResponse)
 def resolve_indication(payload: ResolveIndicationRequest) -> ResolveIndicationResponse:
-    return ResolveIndicationResponse(matches=resolve_query(payload.query))
+    pipeline = get_pipeline()
+    matches: list[MondoMatch] = pipeline.resolve_indication(payload.query)
+
+    normalized = [Match(label=match.label, mondo_id=match.mondo_id) for match in matches]
+    return ResolveIndicationResponse(matches=normalized)
 
 
 @app.post("/runs", response_model=RunResponse)
 def create_run(payload: RunCreateRequest) -> RunResponse:
     run_id = f"run_{uuid4().hex[:8]}"
     ts = now_iso()
-    candidates, score_breakdown = build_mock_candidates(payload.mondo_id, payload.top_k)
+
+    pipeline = get_pipeline()
+
+    try:
+        pipeline_result = pipeline.build_run(payload.mondo_id, payload.top_k)
+    except PipelineError as error:
+        run = {
+            "run_id": run_id,
+            "status": "failed",
+            "stage": "failed",
+            "mondo_id": payload.mondo_id,
+            "top_k": payload.top_k,
+            "docking_enabled": payload.enable_docking,
+            "candidates": [],
+            "score_breakdown": [],
+            "targets": [],
+            "pathways": [],
+            "limitations": [f"Pipeline failure: {error}"],
+            "created_at": ts,
+            "updated_at": ts,
+        }
+        RUNS[run_id] = run
+        return RunResponse(**run)
 
     run = {
         "run_id": run_id,
@@ -172,15 +162,27 @@ def create_run(payload: RunCreateRequest) -> RunResponse:
         "mondo_id": payload.mondo_id,
         "top_k": payload.top_k,
         "docking_enabled": payload.enable_docking,
-        "candidates": candidates,
-        "score_breakdown": score_breakdown,
-        "limitations": [
-            "Research-use only; not medical advice.",
-            "Off-patent status is a heuristic unless jurisdictional data is integrated.",
-        ],
+        "candidates": pipeline_result.candidates,
+        "score_breakdown": pipeline_result.score_breakdown,
+        "targets": pipeline_result.targets,
+        "pathways": pipeline_result.pathways,
+        "limitations": pipeline_result.limitations,
         "created_at": ts,
         "updated_at": ts,
     }
+
+    anthro_ranker = get_anthropic_ranker()
+    reranked_candidates, anthropic_note = anthro_ranker.rerank(
+        mondo_id=payload.mondo_id,
+        targets=pipeline_result.targets,
+        pathways=pipeline_result.pathways,
+        candidates=run["candidates"],
+    )
+    run["candidates"] = reranked_candidates
+    run["score_breakdown"] = build_score_breakdown(run["candidates"])
+    if anthropic_note:
+        run["limitations"].append(anthropic_note)
+
     RUNS[run_id] = run
     return RunResponse(**run)
 
@@ -203,25 +205,38 @@ def run_docking(run_id: str, payload: DockRequest) -> RunResponse:
     run["stage"] = "docking"
     run["updated_at"] = now_iso()
 
-    # MVP behavior: immediate mocked docking completion.
+    tamarind = get_tamarind_client()
+    pair_payload = [{"drug": pair.drug, "target": pair.target} for pair in payload.pairs]
+    docking_scores, docking_note = tamarind.dock_pairs(pair_payload)
+    if docking_note:
+        run["limitations"].append(docking_note)
+
     for pair in payload.pairs:
+        key = (pair.drug, pair.target)
+        structural_score = docking_scores.get(key, 0.72)
         for candidate in run["candidates"]:
             if candidate["drug"] == pair.drug and candidate["target"] == pair.target:
-                candidate["score_breakdown"]["structural_plausibility"] = 0.72
-                candidate["repurposing_score"] = round(candidate["repurposing_score"] + 0.03, 3)
+                candidate["score_breakdown"]["structural_plausibility"] = structural_score
+                candidate["repurposing_score"] = BioPipeline._weighted_score(
+                    disease_target_relevance=float(
+                        candidate["score_breakdown"].get("disease_target_relevance", 0.0)
+                    ),
+                    pathway_intervention_fit=float(
+                        candidate["score_breakdown"].get("pathway_intervention_fit", 0.0)
+                    ),
+                    mechanism_directionality_fit=float(
+                        candidate["score_breakdown"].get("mechanism_directionality_fit", 0.0)
+                    ),
+                    repurposability_score=float(
+                        candidate["score_breakdown"].get("repurposability_score", 0.0)
+                    ),
+                    structural_plausibility=structural_score,
+                )
 
     run["candidates"] = sorted(
         run["candidates"], key=lambda c: c["repurposing_score"], reverse=True
     )
-    run["score_breakdown"] = [
-        {
-            "drug": c["drug"],
-            "target": c["target"],
-            "score": c["repurposing_score"],
-            "components": c["score_breakdown"],
-        }
-        for c in run["candidates"]
-    ]
+    run["score_breakdown"] = build_score_breakdown(run["candidates"])
     run["status"] = "completed"
     run["stage"] = "finalized"
     run["updated_at"] = now_iso()
@@ -235,9 +250,13 @@ def get_report(run_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Run not found")
 
     top = run["candidates"][:3]
+    top_target = run["targets"][0]["gene_symbol"] if run.get("targets") else "unknown"
+    top_pathway = run["pathways"][0]["pathway_name"] if run.get("pathways") else "n/a"
+
     summary = (
         f"Run {run_id} prioritized {len(run['candidates'])} candidates for {run['mondo_id']}. "
-        f"Top candidate: {top[0]['drug']} targeting {top[0]['target']}."
+        f"Top candidate: {top[0]['drug']} targeting {top[0]['target']}. "
+        f"Primary target signal: {top_target}. Primary pathway: {top_pathway}."
         if top
         else f"Run {run_id} has no candidates yet."
     )

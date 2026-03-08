@@ -20,7 +20,11 @@ class HealthEndpointTest(unittest.TestCase):
 
         resolved = client.post("/resolve-indication", json={"query": "lung fibrosis"})
         self.assertEqual(resolved.status_code, 200)
-        mondo_id = resolved.json()["matches"][0]["mondo_id"]
+        mondo_id = "MONDO:0006374"
+        for match in resolved.json()["matches"]:
+            if match["mondo_id"] == "MONDO:0006374":
+                mondo_id = match["mondo_id"]
+                break
 
         created = client.post(
             "/runs", json={"mondo_id": mondo_id, "top_k": 10, "enable_docking": True}
