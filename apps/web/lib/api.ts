@@ -1,9 +1,24 @@
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+export type TermNode = {
+  label: string;
+  mondo_id: string;
+  open_targets_id: string | null;
+  target_count: number;
+  runnable: boolean;
+};
+
 export type Match = {
   label: string;
   mondo_id: string;
+  open_targets_id: string | null;
+  target_count: number;
+  runnable: boolean;
+  requires_refinement: boolean;
+  synonyms: string[];
+  parents: TermNode[];
+  refinements: TermNode[];
 };
 
 export type Candidate = {
@@ -26,6 +41,7 @@ export type Run = {
   status: string;
   stage: string;
   mondo_id: string;
+  disease_id: string | null;
   docking_enabled: boolean;
   candidates: Candidate[];
   limitations: string[];
@@ -42,11 +58,22 @@ export async function resolveIndication(query: string): Promise<Match[]> {
   return data.matches;
 }
 
-export async function createRun(mondoId: string, enableDocking: boolean): Promise<Run> {
+export async function createRun(
+  mondoId: string,
+  diseaseId: string,
+  label: string,
+  enableDocking: boolean,
+): Promise<Run> {
   const response = await fetch(`${API_BASE_URL}/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mondo_id: mondoId, top_k: 20, enable_docking: enableDocking }),
+    body: JSON.stringify({
+      mondo_id: mondoId,
+      disease_id: diseaseId,
+      label,
+      top_k: 20,
+      enable_docking: enableDocking,
+    }),
   });
   if (!response.ok) throw new Error("Failed to create run");
   return response.json();

@@ -18,16 +18,31 @@ class HealthEndpointTest(unittest.TestCase):
     def test_run_lifecycle(self) -> None:
         client = TestClient(app)
 
-        resolved = client.post("/resolve-indication", json={"query": "lung fibrosis"})
+        resolved = client.post("/resolve-indication", json={"query": "ulcerative colitis"})
         self.assertEqual(resolved.status_code, 200)
-        mondo_id = "MONDO:0006374"
+        selected = None
         for match in resolved.json()["matches"]:
-            if match["mondo_id"] == "MONDO:0006374":
-                mondo_id = match["mondo_id"]
+            if match.get("runnable") and match.get("open_targets_id"):
+                selected = match
+                break
+            for refinement in match.get("refinements", []):
+                if refinement.get("runnable") and refinement.get("open_targets_id"):
+                    selected = refinement
+                    break
+            if selected:
                 break
 
+        self.assertIsNotNone(selected)
+
         created = client.post(
-            "/runs", json={"mondo_id": mondo_id, "top_k": 10, "enable_docking": True}
+            "/runs",
+            json={
+                "mondo_id": selected["mondo_id"],
+                "disease_id": selected["open_targets_id"],
+                "label": selected["label"],
+                "top_k": 10,
+                "enable_docking": True,
+            },
         )
         self.assertEqual(created.status_code, 200)
         run = created.json()

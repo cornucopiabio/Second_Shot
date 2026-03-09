@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.pipeline import BioPipeline, MondoMatch, PipelineError
+from app.pipeline import BioPipeline, PipelineError, ResolvedTerm, TermOption
 from app.providers import AnthropicRanker, TamarindDockingClient
 
 
@@ -34,6 +34,21 @@ class ResolveIndicationRequest(BaseModel):
 class Match(BaseModel):
     label: str
     mondo_id: str
+    open_targets_id: str | None = None
+    target_count: int = 0
+    runnable: bool = False
+    requires_refinement: bool = False
+    synonyms: list[str] = Field(default_factory=list)
+    parents: list["TermNode"] = Field(default_factory=list)
+    refinements: list["TermNode"] = Field(default_factory=list)
+
+
+class TermNode(BaseModel):
+    label: str
+    mondo_id: str
+    open_targets_id: str | None = None
+    target_count: int = 0
+    runnable: bool = False
 
 
 class ResolveIndicationResponse(BaseModel):
@@ -42,6 +57,8 @@ class ResolveIndicationResponse(BaseModel):
 
 class RunCreateRequest(BaseModel):
     mondo_id: str
+    disease_id: str | None = None
+    label: str | None = None
     top_k: int = Field(default=20, ge=1, le=100)
     enable_docking: bool = False
 
@@ -67,6 +84,7 @@ class RunResponse(BaseModel):
     ]
     stage: str
     mondo_id: str
+    disease_id: str | None = None
     top_k: int
     docking_enabled: bool
     candidates: list[dict[str, Any]] = Field(default_factory=list)
@@ -76,6 +94,9 @@ class RunResponse(BaseModel):
     limitations: list[str] = Field(default_factory=list)
     created_at: str
     updated_at: str
+
+
+Match.model_rebuild()
 
 
 @lru_cache(maxsize=1)
@@ -121,9 +142,40 @@ def health() -> dict[str, str]:
 @app.post("/resolve-indication", response_model=ResolveIndicationResponse)
 def resolve_indication(payload: ResolveIndicationRequest) -> ResolveIndicationResponse:
     pipeline = get_pipeline()
-    matches: list[MondoMatch] = pipeline.resolve_indication(payload.query)
+    matches: list[ResolvedTerm] = pipeline.resolve_indication(payload.query)
 
-    normalized = [Match(label=match.label, mondo_id=match.mondo_id) for match in matches]
+    normalized = [
+        Match(
+            label=match.label,
+            mondo_id=match.mondo_id,
+            open_targets_id=match.open_targets_id,
+            target_count=match.target_count,
+            runnable=match.runnable,
+            requires_refinement=match.requires_refinement,
+            synonyms=match.synonyms,
+            parents=[
+                TermNode(
+                    label=parent.label,
+                    mondo_id=parent.mondo_id,
+                    open_targets_id=parent.open_targets_id,
+                    target_count=parent.target_count,
+                    runnable=parent.runnable,
+                )
+                for parent in match.parents
+            ],
+            refinements=[
+                TermNode(
+                    label=refinement.label,
+                    mondo_id=refinement.mondo_id,
+                    open_targets_id=refinement.open_targets_id,
+                    target_count=refinement.target_count,
+                    runnable=refinement.runnable,
+                )
+                for refinement in match.refinements
+            ],
+        )
+        for match in matches
+    ]
     return ResolveIndicationResponse(matches=normalized)
 
 
@@ -135,13 +187,19 @@ def create_run(payload: RunCreateRequest) -> RunResponse:
     pipeline = get_pipeline()
 
     try:
-        pipeline_result = pipeline.build_run(payload.mondo_id, payload.top_k)
+        pipeline_result = pipeline.build_run(
+            mondo_id=payload.mondo_id,
+            top_k=payload.top_k,
+            disease_id=payload.disease_id,
+            label=payload.label,
+        )
     except PipelineError as error:
         run = {
             "run_id": run_id,
             "status": "failed",
             "stage": "failed",
             "mondo_id": payload.mondo_id,
+            "disease_id": payload.disease_id,
             "top_k": payload.top_k,
             "docking_enabled": payload.enable_docking,
             "candidates": [],
@@ -160,6 +218,7 @@ def create_run(payload: RunCreateRequest) -> RunResponse:
         "status": "partial" if payload.enable_docking else "completed",
         "stage": "docking_pending" if payload.enable_docking else "finalized",
         "mondo_id": payload.mondo_id,
+        "disease_id": pipeline_result.disease_id,
         "top_k": payload.top_k,
         "docking_enabled": payload.enable_docking,
         "candidates": pipeline_result.candidates,

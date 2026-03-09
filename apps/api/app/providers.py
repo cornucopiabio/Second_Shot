@@ -6,6 +6,11 @@ from typing import Any
 
 import httpx
 
+from app.env import load_repo_env
+
+
+load_repo_env()
+
 
 class AnthropicRanker:
     def __init__(self) -> None:
